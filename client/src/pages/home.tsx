@@ -1,19 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Logo } from '@/components/Logo';
 import { PerplexityAttribution } from '@/components/PerplexityAttribution';
-import {
-  createInitialState,
-  getNextBotMessage,
-  getProgress,
-  generateMemoryFile,
-  type ConversationState,
-} from '@/lib/conversation-engine';
+import { apiRequest } from '@/lib/queryClient';
 import { ArrowRight, Download, Copy, Check, Sparkles, Brain, Zap, FileText } from 'lucide-react';
 
 type AppView = 'landing' | 'chat' | 'preview';
 
 interface ChatMessage {
-  role: 'bot' | 'user';
+  role: 'assistant' | 'user';
   content: string;
   id: number;
 }
@@ -21,14 +15,15 @@ interface ChatMessage {
 export default function Home() {
   const [view, setView] = useState<AppView>('landing');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [convState, setConvState] = useState<ConversationState>(createInitialState());
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [isWaitingForAPI, setIsWaitingForAPI] = useState(false);
   const [displayedText, setDisplayedText] = useState('');
   const [typingMessageId, setTypingMessageId] = useState<number | null>(null);
   const [memoryFile, setMemoryFile] = useState('');
   const [copied, setCopied] = useState(false);
-  const [progress, setProgress] = useState(0);
+  const [isComplete, setIsComplete] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const msgIdCounter = useRef(0);
@@ -42,90 +37,134 @@ export default function Home() {
   }, [messages, displayedText, scrollToBottom]);
 
   // Typewriter effect
-  const typeMessage = useCallback((text: string, msgId: number) => {
-    setIsTyping(true);
-    setTypingMessageId(msgId);
-    setDisplayedText('');
-    
-    let index = 0;
-    const speed = 18; // ms per character
-    
-    const timer = setInterval(() => {
-      if (index < text.length) {
-        setDisplayedText(text.substring(0, index + 1));
-        index++;
-      } else {
-        clearInterval(timer);
-        setIsTyping(false);
-        setTypingMessageId(null);
-        setMessages(prev => prev.map(m => m.id === msgId ? { ...m, content: text } : m));
-      }
-    }, speed);
+  const typeMessage = useCallback((text: string, msgId: number): Promise<void> => {
+    return new Promise((resolve) => {
+      setIsTyping(true);
+      setTypingMessageId(msgId);
+      setDisplayedText('');
 
-    return () => clearInterval(timer);
+      let index = 0;
+      const speed = 18;
+
+      const timer = setInterval(() => {
+        if (index < text.length) {
+          setDisplayedText(text.substring(0, index + 1));
+          index++;
+        } else {
+          clearInterval(timer);
+          setIsTyping(false);
+          setTypingMessageId(null);
+          setMessages(prev => prev.map(m => m.id === msgId ? { ...m, content: text } : m));
+          resolve();
+        }
+      }, speed);
+    });
   }, []);
 
-  // Start chat
-  const startChat = useCallback(() => {
+  // Call the chat API
+  const callChatAPI = useCallback(async (conversationMessages: { role: string; content: string }[]) => {
+    try {
+      const res = await apiRequest('POST', '/api/chat', {
+        messages: conversationMessages,
+        collectedData: {},
+      });
+      const data = await res.json();
+      return data as { message: string; isComplete: boolean };
+    } catch (error) {
+      console.error('Chat API error:', error);
+      return { message: "Sorry, I'm having trouble connecting. Please try again.", isComplete: false };
+    }
+  }, []);
+
+  // Call the generate-memory API
+  const callGenerateMemoryAPI = useCallback(async (conversationMessages: { role: string; content: string }[]) => {
+    try {
+      const res = await apiRequest('POST', '/api/generate-memory', {
+        messages: conversationMessages,
+      });
+      const data = await res.json();
+      return data as { memoryFile: string };
+    } catch (error) {
+      console.error('Generate memory API error:', error);
+      return { memoryFile: 'Failed to generate memory file. Please try again.' };
+    }
+  }, []);
+
+  // Start chat — get the first bot greeting from the API
+  const startChat = useCallback(async () => {
     setView('chat');
-    const initialState = createInitialState();
-    const { message, newState } = getNextBotMessage(initialState);
-    
+    setIsWaitingForAPI(true);
+
+    // Add a placeholder bot message with loading dots
     const msgId = ++msgIdCounter.current;
-    const botMsg: ChatMessage = { role: 'bot', content: '', id: msgId };
+    const botMsg: ChatMessage = { role: 'assistant', content: '', id: msgId };
     setMessages([botMsg]);
-    setConvState(newState);
-    setProgress(getProgress(newState));
-    
-    // Small delay before typing starts
-    setTimeout(() => {
-      typeMessage(message, msgId);
-    }, 600);
-  }, [typeMessage]);
+
+    // Call API with empty message history to get the initial greeting
+    const response = await callChatAPI([]);
+
+    setIsWaitingForAPI(false);
+    await typeMessage(response.message, msgId);
+  }, [typeMessage, callChatAPI]);
 
   // Send user message
-  const sendMessage = useCallback(() => {
-    if (!inputValue.trim() || isTyping) return;
-    
+  const sendMessage = useCallback(async () => {
+    if (!inputValue.trim() || isTyping || isWaitingForAPI) return;
+
     const userText = inputValue.trim();
     setInputValue('');
-    
+
     // Add user message
     const userMsgId = ++msgIdCounter.current;
     const userMsg: ChatMessage = { role: 'user', content: userText, id: userMsgId };
+
     setMessages(prev => [...prev, userMsg]);
-    
-    // Get bot response
-    const { message, newState, isComplete } = getNextBotMessage(convState, userText);
-    setConvState(newState);
-    setProgress(getProgress(newState));
-    
-    if (isComplete) {
-      // Generate memory file
-      setTimeout(() => {
-        const botMsgId = ++msgIdCounter.current;
-        const botMsg: ChatMessage = { role: 'bot', content: '', id: botMsgId };
-        setMessages(prev => [...prev, botMsg]);
-        typeMessage(message, botMsgId);
-        
-        // Generate the file after typing
-        setTimeout(() => {
-          const file = generateMemoryFile(newState.profile);
-          setMemoryFile(file);
-          setProgress(100);
-          setTimeout(() => setView('preview'), 1500);
-        }, message.length * 18 + 500);
-      }, 800);
-    } else if (message) {
-      // Add bot response with typing animation
-      setTimeout(() => {
-        const botMsgId = ++msgIdCounter.current;
-        const botMsg: ChatMessage = { role: 'bot', content: '', id: botMsgId };
-        setMessages(prev => [...prev, botMsg]);
-        typeMessage(message, botMsgId);
-      }, 800);
+
+    // Build conversation history for API (only completed messages, not the ones still typing)
+    const currentMessages = [...messages.filter(m => m.content), { role: 'user' as const, content: userText }];
+    const apiMessages = currentMessages.map(m => ({ role: m.role, content: m.content }));
+
+    // Show loading state
+    setIsWaitingForAPI(true);
+    const botMsgId = ++msgIdCounter.current;
+    const botMsg: ChatMessage = { role: 'assistant', content: '', id: botMsgId };
+    setMessages(prev => [...prev, botMsg]);
+
+    // Call API
+    const response = await callChatAPI(apiMessages);
+
+    setIsWaitingForAPI(false);
+
+    if (response.isComplete) {
+      setIsComplete(true);
+      // Clean the response — strip the GENERATE_MEMORY_FILE marker and any JSON for display
+      let cleanMessage = response.message;
+      const markerIndex = cleanMessage.indexOf('GENERATE_MEMORY_FILE');
+      if (markerIndex !== -1) {
+        cleanMessage = cleanMessage.substring(0, markerIndex).trim();
+        if (!cleanMessage) {
+          cleanMessage = "I have all the information I need to generate your memory file!";
+        }
+      }
+      await typeMessage(cleanMessage, botMsgId);
+    } else {
+      await typeMessage(response.message, botMsgId);
     }
-  }, [inputValue, isTyping, convState, typeMessage]);
+  }, [inputValue, isTyping, isWaitingForAPI, messages, callChatAPI, typeMessage]);
+
+  // Generate memory file
+  const handleGenerateMemory = useCallback(async () => {
+    setIsGenerating(true);
+
+    const conversationMessages = messages
+      .filter(m => m.content)
+      .map(m => ({ role: m.role, content: m.content }));
+
+    const response = await callGenerateMemoryAPI(conversationMessages);
+    setMemoryFile(response.memoryFile);
+    setIsGenerating(false);
+    setView('preview');
+  }, [messages, callGenerateMemoryAPI]);
 
   // Handle key press
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -155,7 +194,6 @@ export default function Home() {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      // Fallback
       const textarea = document.createElement('textarea');
       textarea.value = memoryFile;
       document.body.appendChild(textarea);
@@ -169,12 +207,10 @@ export default function Home() {
 
   // Render markdown-like bold and bullet points
   const renderText = (text: string) => {
-    // Split into lines first, then process each line
     const lines = text.split('\n');
     return lines.map((line, lineIdx) => {
-      const isBullet = line.trimStart().startsWith('•');
-      
-      // Process bold within the line
+      const isBullet = line.trimStart().startsWith('•') || line.trimStart().startsWith('-');
+
       const parts = line.split(/(\*\*.*?\*\*)/g);
       const rendered = parts.map((part, i) => {
         if (part.startsWith('**') && part.endsWith('**')) {
@@ -182,7 +218,7 @@ export default function Home() {
         }
         return <span key={i}>{part}</span>;
       });
-      
+
       if (isBullet) {
         return <div key={lineIdx} className="pl-1 mt-0.5">{rendered}</div>;
       }
@@ -192,6 +228,10 @@ export default function Home() {
       return <div key={lineIdx}>{rendered}</div>;
     });
   };
+
+  // Compute progress based on messages (rough approximation)
+  const messageCount = messages.filter(m => m.role === 'user' && m.content).length;
+  const progress = isComplete ? 100 : Math.min(95, Math.round((messageCount / 15) * 100));
 
   // === LANDING VIEW ===
   if (view === 'landing') {
@@ -208,14 +248,13 @@ export default function Home() {
         {/* Hero */}
         <main className="flex-1 flex flex-col items-center justify-center px-6 text-center">
           <div className="max-w-2xl mx-auto">
-            {/* Floating nodes decoration */}
             <div className="relative mb-8">
               <div className="absolute -top-4 -left-8 w-2 h-2 rounded-full bg-primary/40 animate-pulse" />
               <div className="absolute -top-8 right-12 w-1.5 h-1.5 rounded-full bg-primary/30 animate-pulse" style={{ animationDelay: '1s' }} />
               <div className="absolute top-4 -right-4 w-2.5 h-2.5 rounded-full bg-primary/20 animate-pulse" style={{ animationDelay: '2s' }} />
               <Logo size={64} className="text-primary mx-auto" />
             </div>
-            
+
             <h1
               className="text-xl font-bold tracking-tight mb-4 bg-gradient-to-r from-white via-white to-primary/80 bg-clip-text text-transparent"
               style={{ fontSize: 'clamp(1.75rem, 1.2rem + 2.5vw, 2.75rem)', lineHeight: 1.1 }}
@@ -223,12 +262,12 @@ export default function Home() {
             >
               Build your AI memory<br />in minutes
             </h1>
-            
+
             <p className="text-muted-foreground text-sm max-w-md mx-auto mb-8 leading-relaxed" style={{ fontSize: 'clamp(0.875rem, 0.8rem + 0.25vw, 1rem)' }}>
-              Have a quick conversation with MemoryForge and walk away with a personal context file 
+              Have a quick conversation with MemoryForge and walk away with a personal context file
               you can paste into any AI — Claude, ChatGPT, Perplexity, or others.
             </p>
-            
+
             <button
               onClick={startChat}
               className="inline-flex items-center gap-2 bg-primary hover:bg-primary/90 text-primary-foreground px-6 py-3 rounded-lg font-medium text-sm transition-all duration-200 glow-pulse"
@@ -237,14 +276,14 @@ export default function Home() {
               Start conversation
               <ArrowRight className="w-4 h-4" />
             </button>
-            
+
             {/* Features */}
             <div className="mt-16 grid grid-cols-3 gap-6 max-w-lg mx-auto">
               <div className="text-center">
                 <div className="w-9 h-9 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center mx-auto mb-2">
                   <Brain className="w-4 h-4 text-primary" />
                 </div>
-                <p className="text-xs text-muted-foreground">Adaptive<br />conversation</p>
+                <p className="text-xs text-muted-foreground">AI-powered<br />conversation</p>
               </div>
               <div className="text-center">
                 <div className="w-9 h-9 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center mx-auto mb-2">
@@ -280,7 +319,7 @@ export default function Home() {
             <Logo size={24} className="text-primary" />
             <span className="font-semibold text-sm">MemoryForge</span>
           </div>
-          
+
           {/* Progress */}
           <div className="flex items-center gap-3">
             <span className="text-xs text-muted-foreground">{progress}%</span>
@@ -300,8 +339,8 @@ export default function Home() {
             {messages.map((msg) => {
               const isCurrentlyTyping = typingMessageId === msg.id;
               const content = isCurrentlyTyping ? displayedText : msg.content;
-              
-              if (msg.role === 'bot') {
+
+              if (msg.role === 'assistant') {
                 return (
                   <div key={msg.id} className="flex gap-3 message-enter">
                     <div className="w-7 h-7 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0 mt-0.5">
@@ -323,7 +362,7 @@ export default function Home() {
                   </div>
                 );
               }
-              
+
               return (
                 <div key={msg.id} className="flex justify-end message-enter">
                   <div className="max-w-[80%]">
@@ -338,34 +377,63 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Input */}
+        {/* Generate button or input */}
         <div className="px-4 pb-4 pt-2 border-t border-border/50 bg-background/80 backdrop-blur-sm shrink-0">
           <div className="max-w-2xl mx-auto">
-            <div className="relative flex items-end gap-2">
-              <textarea
-                ref={inputRef}
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder={isTyping ? 'Waiting for response...' : 'Type your answer...'}
-                disabled={isTyping}
-                rows={1}
-                className="flex-1 bg-card border border-card-border rounded-xl px-4 py-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 disabled:opacity-50 placeholder:text-muted-foreground/50"
-                style={{ maxHeight: '120px', minHeight: '44px' }}
-                data-testid="chat-input"
-              />
-              <button
-                onClick={sendMessage}
-                disabled={!inputValue.trim() || isTyping}
-                className="bg-primary hover:bg-primary/90 text-primary-foreground p-3 rounded-xl transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
-                data-testid="send-btn"
-              >
-                <ArrowRight className="w-4 h-4" />
-              </button>
-            </div>
-            <p className="text-[11px] text-muted-foreground/40 mt-2 text-center">
-              Press Enter to send • Shift+Enter for new line
-            </p>
+            {isComplete ? (
+              <div className="text-center py-2">
+                <button
+                  onClick={handleGenerateMemory}
+                  disabled={isGenerating}
+                  className="inline-flex items-center gap-2 bg-primary hover:bg-primary/90 text-primary-foreground px-6 py-3 rounded-lg font-medium text-sm transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed glow-pulse"
+                  data-testid="generate-memory-btn"
+                >
+                  {isGenerating ? (
+                    <>
+                      <span className="inline-flex gap-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-primary-foreground/70 animate-bounce" style={{ animationDelay: '0ms' }} />
+                        <span className="w-1.5 h-1.5 rounded-full bg-primary-foreground/70 animate-bounce" style={{ animationDelay: '150ms' }} />
+                        <span className="w-1.5 h-1.5 rounded-full bg-primary-foreground/70 animate-bounce" style={{ animationDelay: '300ms' }} />
+                      </span>
+                      Generating...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-4 h-4" />
+                      Generate my memory file
+                    </>
+                  )}
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="relative flex items-end gap-2">
+                  <textarea
+                    ref={inputRef}
+                    value={inputValue}
+                    onChange={(e) => setInputValue(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder={isTyping || isWaitingForAPI ? 'Waiting for response...' : 'Type your answer...'}
+                    disabled={isTyping || isWaitingForAPI}
+                    rows={1}
+                    className="flex-1 bg-card border border-card-border rounded-xl px-4 py-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 disabled:opacity-50 placeholder:text-muted-foreground/50"
+                    style={{ maxHeight: '120px', minHeight: '44px' }}
+                    data-testid="chat-input"
+                  />
+                  <button
+                    onClick={sendMessage}
+                    disabled={!inputValue.trim() || isTyping || isWaitingForAPI}
+                    className="bg-primary hover:bg-primary/90 text-primary-foreground p-3 rounded-xl transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
+                    data-testid="send-btn"
+                  >
+                    <ArrowRight className="w-4 h-4" />
+                  </button>
+                </div>
+                <p className="text-[11px] text-muted-foreground/40 mt-2 text-center">
+                  Press Enter to send · Shift+Enter for new line
+                </p>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -425,7 +493,7 @@ export default function Home() {
               <FileText className="w-3.5 h-3.5 text-muted-foreground" />
               <span className="text-xs font-medium text-muted-foreground">my-ai-memory.txt</span>
             </div>
-            
+
             {/* Content */}
             <div className="p-5 font-mono text-xs leading-relaxed whitespace-pre-wrap text-foreground/90" style={{ fontSize: '13px', lineHeight: '1.7' }}>
               {memoryFile.split('\n').map((line, i) => {
@@ -457,7 +525,7 @@ export default function Home() {
               })}
             </div>
           </div>
-          
+
           {/* How to use */}
           <div className="mt-6 p-4 rounded-xl bg-card border border-card-border">
             <h3 className="text-sm font-semibold mb-2">How to use this file</h3>
@@ -480,16 +548,15 @@ export default function Home() {
               </li>
             </ul>
           </div>
-          
+
           {/* Start over */}
           <div className="mt-4 text-center">
             <button
               onClick={() => {
                 setView('landing');
                 setMessages([]);
-                setConvState(createInitialState());
                 setMemoryFile('');
-                setProgress(0);
+                setIsComplete(false);
               }}
               className="text-xs text-muted-foreground hover:text-foreground transition-colors"
               data-testid="start-over-btn"
