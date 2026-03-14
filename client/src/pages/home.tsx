@@ -176,11 +176,11 @@ export default function Home() {
 
   // Download file
   const downloadFile = useCallback(() => {
-    const blob = new Blob([memoryFile], { type: 'text/plain' });
+    const blob = new Blob([memoryFile], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'my-ai-memory.txt';
+    a.download = 'my-ai-memory.md';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -229,9 +229,54 @@ export default function Home() {
     });
   };
 
-  // Compute progress based on messages (rough approximation)
-  const messageCount = messages.filter(m => m.role === 'user' && m.content).length;
-  const progress = isComplete ? 100 : Math.min(95, Math.round((messageCount / 15) * 100));
+  // Section names for the progress indicator
+  const SECTION_NAMES: Record<number, string> = {
+    1: 'Identity & Background',
+    2: 'Business Overview',
+    3: 'Brand, Positioning & Voice',
+    4: 'Operations, Tools & Workflows',
+    5: 'Customers, Problems & Objections',
+    6: 'Current Priorities & Constraints',
+    7: 'Personal AI Preferences',
+    8: 'Knowledge Boundaries & Sources',
+    9: 'Security, Privacy & Boundaries',
+    10: 'House Rules & Meta-Preferences',
+    11: 'Technical & Coding Profile',
+  };
+
+  // Detect current section from AI messages
+  const currentSection = (() => {
+    // Scan all assistant messages (completed ones) for section references
+    const assistantMessages = messages
+      .filter(m => m.role === 'assistant' && m.content)
+      .map(m => m.content);
+    
+    let detected = 1; // default to section 1
+    for (const text of assistantMessages) {
+      // Match patterns like "Section 5", "section 5", "Moving on to Section 5", etc.
+      const matches = text.matchAll(/(?:section|Section)\s+(\d{1,2})/gi);
+      for (const match of matches) {
+        const num = parseInt(match[1], 10);
+        if (num >= 1 && num <= 11 && num > detected) {
+          detected = num;
+        }
+      }
+    }
+    // Also check the currently typing text
+    if (typingMessageId !== null && displayedText) {
+      const matches = displayedText.matchAll(/(?:section|Section)\s+(\d{1,2})/gi);
+      for (const match of matches) {
+        const num = parseInt(match[1], 10);
+        if (num >= 1 && num <= 11 && num > detected) {
+          detected = num;
+        }
+      }
+    }
+    return detected;
+  })();
+
+  // Compute progress based on section
+  const progress = isComplete ? 100 : Math.min(95, Math.round((currentSection / 11) * 100));
 
   // === LANDING VIEW ===
   if (view === 'landing') {
@@ -332,6 +377,22 @@ export default function Home() {
             </div>
           </div>
         </header>
+
+        {/* Section progress indicator */}
+        <div className="px-4 py-1.5 border-b border-border/30 bg-background/60 backdrop-blur-sm shrink-0">
+          <div className="max-w-2xl mx-auto flex items-center justify-center">
+            <span
+              className="inline-flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground bg-muted/50 px-3 py-1 rounded-full"
+              data-testid="section-indicator"
+            >
+              <span className="text-primary">{isComplete ? '11' : currentSection}</span>
+              <span className="text-muted-foreground/50">/</span>
+              <span>11</span>
+              <span className="text-muted-foreground/40 mx-0.5">·</span>
+              <span>{isComplete ? 'Complete' : SECTION_NAMES[currentSection]}</span>
+            </span>
+          </div>
+        </div>
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto px-4 py-6" data-testid="chat-messages">
@@ -464,7 +525,7 @@ export default function Home() {
             data-testid="download-btn"
           >
             <Download className="w-3.5 h-3.5" />
-            Download .txt
+            Download .md
           </button>
         </div>
       </header>
@@ -491,7 +552,7 @@ export default function Home() {
             {/* File tab */}
             <div className="flex items-center gap-2 px-4 py-2.5 bg-muted/30 border-b border-card-border">
               <FileText className="w-3.5 h-3.5 text-muted-foreground" />
-              <span className="text-xs font-medium text-muted-foreground">my-ai-memory.txt</span>
+              <span className="text-xs font-medium text-muted-foreground">my-ai-memory.md</span>
             </div>
 
             {/* Content */}
