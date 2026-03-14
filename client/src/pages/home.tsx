@@ -1,0 +1,509 @@
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { Logo } from '@/components/Logo';
+import { PerplexityAttribution } from '@/components/PerplexityAttribution';
+import {
+  createInitialState,
+  getNextBotMessage,
+  getProgress,
+  generateMemoryFile,
+  type ConversationState,
+} from '@/lib/conversation-engine';
+import { ArrowRight, Download, Copy, Check, Sparkles, Brain, Zap, FileText } from 'lucide-react';
+
+type AppView = 'landing' | 'chat' | 'preview';
+
+interface ChatMessage {
+  role: 'bot' | 'user';
+  content: string;
+  id: number;
+}
+
+export default function Home() {
+  const [view, setView] = useState<AppView>('landing');
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [convState, setConvState] = useState<ConversationState>(createInitialState());
+  const [inputValue, setInputValue] = useState('');
+  const [isTyping, setIsTyping] = useState(false);
+  const [displayedText, setDisplayedText] = useState('');
+  const [typingMessageId, setTypingMessageId] = useState<number | null>(null);
+  const [memoryFile, setMemoryFile] = useState('');
+  const [copied, setCopied] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const msgIdCounter = useRef(0);
+
+  const scrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, []);
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, displayedText, scrollToBottom]);
+
+  // Typewriter effect
+  const typeMessage = useCallback((text: string, msgId: number) => {
+    setIsTyping(true);
+    setTypingMessageId(msgId);
+    setDisplayedText('');
+    
+    let index = 0;
+    const speed = 18; // ms per character
+    
+    const timer = setInterval(() => {
+      if (index < text.length) {
+        setDisplayedText(text.substring(0, index + 1));
+        index++;
+      } else {
+        clearInterval(timer);
+        setIsTyping(false);
+        setTypingMessageId(null);
+        setMessages(prev => prev.map(m => m.id === msgId ? { ...m, content: text } : m));
+      }
+    }, speed);
+
+    return () => clearInterval(timer);
+  }, []);
+
+  // Start chat
+  const startChat = useCallback(() => {
+    setView('chat');
+    const initialState = createInitialState();
+    const { message, newState } = getNextBotMessage(initialState);
+    
+    const msgId = ++msgIdCounter.current;
+    const botMsg: ChatMessage = { role: 'bot', content: '', id: msgId };
+    setMessages([botMsg]);
+    setConvState(newState);
+    setProgress(getProgress(newState));
+    
+    // Small delay before typing starts
+    setTimeout(() => {
+      typeMessage(message, msgId);
+    }, 600);
+  }, [typeMessage]);
+
+  // Send user message
+  const sendMessage = useCallback(() => {
+    if (!inputValue.trim() || isTyping) return;
+    
+    const userText = inputValue.trim();
+    setInputValue('');
+    
+    // Add user message
+    const userMsgId = ++msgIdCounter.current;
+    const userMsg: ChatMessage = { role: 'user', content: userText, id: userMsgId };
+    setMessages(prev => [...prev, userMsg]);
+    
+    // Get bot response
+    const { message, newState, isComplete } = getNextBotMessage(convState, userText);
+    setConvState(newState);
+    setProgress(getProgress(newState));
+    
+    if (isComplete) {
+      // Generate memory file
+      setTimeout(() => {
+        const botMsgId = ++msgIdCounter.current;
+        const botMsg: ChatMessage = { role: 'bot', content: '', id: botMsgId };
+        setMessages(prev => [...prev, botMsg]);
+        typeMessage(message, botMsgId);
+        
+        // Generate the file after typing
+        setTimeout(() => {
+          const file = generateMemoryFile(newState.profile);
+          setMemoryFile(file);
+          setProgress(100);
+          setTimeout(() => setView('preview'), 1500);
+        }, message.length * 18 + 500);
+      }, 800);
+    } else if (message) {
+      // Add bot response with typing animation
+      setTimeout(() => {
+        const botMsgId = ++msgIdCounter.current;
+        const botMsg: ChatMessage = { role: 'bot', content: '', id: botMsgId };
+        setMessages(prev => [...prev, botMsg]);
+        typeMessage(message, botMsgId);
+      }, 800);
+    }
+  }, [inputValue, isTyping, convState, typeMessage]);
+
+  // Handle key press
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  }, [sendMessage]);
+
+  // Download file
+  const downloadFile = useCallback(() => {
+    const blob = new Blob([memoryFile], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'my-ai-memory.txt';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [memoryFile]);
+
+  // Copy to clipboard
+  const copyToClipboard = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(memoryFile);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Fallback
+      const textarea = document.createElement('textarea');
+      textarea.value = memoryFile;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  }, [memoryFile]);
+
+  // Render markdown-like bold and bullet points
+  const renderText = (text: string) => {
+    // Split into lines first, then process each line
+    const lines = text.split('\n');
+    return lines.map((line, lineIdx) => {
+      const isBullet = line.trimStart().startsWith('•');
+      
+      // Process bold within the line
+      const parts = line.split(/(\*\*.*?\*\*)/g);
+      const rendered = parts.map((part, i) => {
+        if (part.startsWith('**') && part.endsWith('**')) {
+          return <strong key={i} className="font-semibold text-foreground">{part.slice(2, -2)}</strong>;
+        }
+        return <span key={i}>{part}</span>;
+      });
+      
+      if (isBullet) {
+        return <div key={lineIdx} className="pl-1 mt-0.5">{rendered}</div>;
+      }
+      if (line.trim() === '') {
+        return <div key={lineIdx} className="h-2" />;
+      }
+      return <div key={lineIdx}>{rendered}</div>;
+    });
+  };
+
+  // === LANDING VIEW ===
+  if (view === 'landing') {
+    return (
+      <div className="min-h-screen animated-gradient flex flex-col">
+        {/* Header */}
+        <header className="flex items-center justify-between px-6 py-4">
+          <div className="flex items-center gap-2">
+            <Logo size={28} className="text-primary" />
+            <span className="font-semibold text-sm tracking-tight">MemoryForge</span>
+          </div>
+        </header>
+
+        {/* Hero */}
+        <main className="flex-1 flex flex-col items-center justify-center px-6 text-center">
+          <div className="max-w-2xl mx-auto">
+            {/* Floating nodes decoration */}
+            <div className="relative mb-8">
+              <div className="absolute -top-4 -left-8 w-2 h-2 rounded-full bg-primary/40 animate-pulse" />
+              <div className="absolute -top-8 right-12 w-1.5 h-1.5 rounded-full bg-primary/30 animate-pulse" style={{ animationDelay: '1s' }} />
+              <div className="absolute top-4 -right-4 w-2.5 h-2.5 rounded-full bg-primary/20 animate-pulse" style={{ animationDelay: '2s' }} />
+              <Logo size={64} className="text-primary mx-auto" />
+            </div>
+            
+            <h1
+              className="text-xl font-bold tracking-tight mb-4 bg-gradient-to-r from-white via-white to-primary/80 bg-clip-text text-transparent"
+              style={{ fontSize: 'clamp(1.75rem, 1.2rem + 2.5vw, 2.75rem)', lineHeight: 1.1 }}
+              data-testid="hero-heading"
+            >
+              Build your AI memory<br />in minutes
+            </h1>
+            
+            <p className="text-muted-foreground text-sm max-w-md mx-auto mb-8 leading-relaxed" style={{ fontSize: 'clamp(0.875rem, 0.8rem + 0.25vw, 1rem)' }}>
+              Have a quick conversation with MemoryForge and walk away with a personal context file 
+              you can paste into any AI — Claude, ChatGPT, Perplexity, or others.
+            </p>
+            
+            <button
+              onClick={startChat}
+              className="inline-flex items-center gap-2 bg-primary hover:bg-primary/90 text-primary-foreground px-6 py-3 rounded-lg font-medium text-sm transition-all duration-200 glow-pulse"
+              data-testid="start-conversation-btn"
+            >
+              Start conversation
+              <ArrowRight className="w-4 h-4" />
+            </button>
+            
+            {/* Features */}
+            <div className="mt-16 grid grid-cols-3 gap-6 max-w-lg mx-auto">
+              <div className="text-center">
+                <div className="w-9 h-9 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center mx-auto mb-2">
+                  <Brain className="w-4 h-4 text-primary" />
+                </div>
+                <p className="text-xs text-muted-foreground">Adaptive<br />conversation</p>
+              </div>
+              <div className="text-center">
+                <div className="w-9 h-9 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center mx-auto mb-2">
+                  <Zap className="w-4 h-4 text-primary" />
+                </div>
+                <p className="text-xs text-muted-foreground">5 minute<br />setup</p>
+              </div>
+              <div className="text-center">
+                <div className="w-9 h-9 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center mx-auto mb-2">
+                  <FileText className="w-4 h-4 text-primary" />
+                </div>
+                <p className="text-xs text-muted-foreground">Works with<br />any AI</p>
+              </div>
+            </div>
+          </div>
+        </main>
+
+        {/* Footer */}
+        <footer className="px-6 py-4 text-center">
+          <PerplexityAttribution />
+        </footer>
+      </div>
+    );
+  }
+
+  // === CHAT VIEW ===
+  if (view === 'chat') {
+    return (
+      <div className="h-screen flex flex-col bg-background">
+        {/* Chat header */}
+        <header className="flex items-center justify-between px-4 py-3 border-b border-border/50 bg-background/80 backdrop-blur-sm shrink-0">
+          <div className="flex items-center gap-2">
+            <Logo size={24} className="text-primary" />
+            <span className="font-semibold text-sm">MemoryForge</span>
+          </div>
+          
+          {/* Progress */}
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-muted-foreground">{progress}%</span>
+            <div className="w-24 h-1.5 bg-muted rounded-full overflow-hidden">
+              <div
+                className="h-full bg-primary rounded-full transition-all duration-700 ease-out"
+                style={{ width: `${progress}%` }}
+                data-testid="progress-bar"
+              />
+            </div>
+          </div>
+        </header>
+
+        {/* Messages */}
+        <div className="flex-1 overflow-y-auto px-4 py-6" data-testid="chat-messages">
+          <div className="max-w-2xl mx-auto space-y-4">
+            {messages.map((msg) => {
+              const isCurrentlyTyping = typingMessageId === msg.id;
+              const content = isCurrentlyTyping ? displayedText : msg.content;
+              
+              if (msg.role === 'bot') {
+                return (
+                  <div key={msg.id} className="flex gap-3 message-enter">
+                    <div className="w-7 h-7 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0 mt-0.5">
+                      <Sparkles className="w-3.5 h-3.5 text-primary" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="bg-card border border-card-border rounded-xl rounded-tl-sm px-4 py-3 text-sm leading-relaxed">
+                        <div className={isCurrentlyTyping ? 'typing-cursor' : ''}>
+                          {content ? renderText(content) : (
+                            <span className="inline-flex gap-1.5 py-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-primary/50 animate-bounce" style={{ animationDelay: '0ms' }} />
+                              <span className="w-1.5 h-1.5 rounded-full bg-primary/50 animate-bounce" style={{ animationDelay: '150ms' }} />
+                              <span className="w-1.5 h-1.5 rounded-full bg-primary/50 animate-bounce" style={{ animationDelay: '300ms' }} />
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+              
+              return (
+                <div key={msg.id} className="flex justify-end message-enter">
+                  <div className="max-w-[80%]">
+                    <div className="bg-primary text-primary-foreground rounded-xl rounded-tr-sm px-4 py-3 text-sm leading-relaxed">
+                      {msg.content}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+            <div ref={messagesEndRef} />
+          </div>
+        </div>
+
+        {/* Input */}
+        <div className="px-4 pb-4 pt-2 border-t border-border/50 bg-background/80 backdrop-blur-sm shrink-0">
+          <div className="max-w-2xl mx-auto">
+            <div className="relative flex items-end gap-2">
+              <textarea
+                ref={inputRef}
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder={isTyping ? 'Waiting for response...' : 'Type your answer...'}
+                disabled={isTyping}
+                rows={1}
+                className="flex-1 bg-card border border-card-border rounded-xl px-4 py-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 disabled:opacity-50 placeholder:text-muted-foreground/50"
+                style={{ maxHeight: '120px', minHeight: '44px' }}
+                data-testid="chat-input"
+              />
+              <button
+                onClick={sendMessage}
+                disabled={!inputValue.trim() || isTyping}
+                className="bg-primary hover:bg-primary/90 text-primary-foreground p-3 rounded-xl transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
+                data-testid="send-btn"
+              >
+                <ArrowRight className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-[11px] text-muted-foreground/40 mt-2 text-center">
+              Press Enter to send • Shift+Enter for new line
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // === PREVIEW VIEW ===
+  return (
+    <div className="min-h-screen bg-background flex flex-col">
+      {/* Header */}
+      <header className="flex items-center justify-between px-4 py-3 border-b border-border/50 shrink-0">
+        <div className="flex items-center gap-2">
+          <Logo size={24} className="text-primary" />
+          <span className="font-semibold text-sm">MemoryForge</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={copyToClipboard}
+            className="inline-flex items-center gap-1.5 bg-secondary hover:bg-secondary/80 text-secondary-foreground px-3 py-2 rounded-lg text-xs font-medium transition-all duration-200"
+            data-testid="copy-btn"
+          >
+            {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+            {copied ? 'Copied!' : 'Copy'}
+          </button>
+          <button
+            onClick={downloadFile}
+            className="inline-flex items-center gap-1.5 bg-primary hover:bg-primary/90 text-primary-foreground px-3 py-2 rounded-lg text-xs font-medium transition-all duration-200"
+            data-testid="download-btn"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Download .txt
+          </button>
+        </div>
+      </header>
+
+      {/* Success banner */}
+      <div className="bg-primary/5 border-b border-primary/10 px-4 py-3">
+        <div className="max-w-3xl mx-auto flex items-center gap-3">
+          <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+            <Sparkles className="w-4 h-4 text-primary" />
+          </div>
+          <div>
+            <p className="text-sm font-medium">Your AI memory file is ready!</p>
+            <p className="text-xs text-muted-foreground">
+              Copy the text below and paste it into any AI system's memory or custom instructions.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* File preview */}
+      <main className="flex-1 overflow-y-auto px-4 py-6" data-testid="memory-preview">
+        <div className="max-w-3xl mx-auto">
+          <div className="bg-card border border-card-border rounded-xl overflow-hidden">
+            {/* File tab */}
+            <div className="flex items-center gap-2 px-4 py-2.5 bg-muted/30 border-b border-card-border">
+              <FileText className="w-3.5 h-3.5 text-muted-foreground" />
+              <span className="text-xs font-medium text-muted-foreground">my-ai-memory.txt</span>
+            </div>
+            
+            {/* Content */}
+            <div className="p-5 font-mono text-xs leading-relaxed whitespace-pre-wrap text-foreground/90" style={{ fontSize: '13px', lineHeight: '1.7' }}>
+              {memoryFile.split('\n').map((line, i) => {
+                if (line.startsWith('# ')) {
+                  return (
+                    <div key={i} className="text-primary font-bold mt-2 mb-1 text-sm">
+                      {line}
+                    </div>
+                  );
+                }
+                if (line.startsWith('## ')) {
+                  return (
+                    <div key={i} className="text-primary/80 font-semibold mt-4 mb-1">
+                      {line}
+                    </div>
+                  );
+                }
+                if (line.startsWith('Remember that')) {
+                  return (
+                    <div key={i} className="text-foreground/85">
+                      {line}
+                    </div>
+                  );
+                }
+                if (line === '---') {
+                  return <hr key={i} className="border-border/50 my-3" />;
+                }
+                return <div key={i}>{line || '\u00A0'}</div>;
+              })}
+            </div>
+          </div>
+          
+          {/* How to use */}
+          <div className="mt-6 p-4 rounded-xl bg-card border border-card-border">
+            <h3 className="text-sm font-semibold mb-2">How to use this file</h3>
+            <ul className="space-y-1.5 text-xs text-muted-foreground">
+              <li className="flex gap-2">
+                <span className="text-primary font-medium shrink-0">Claude:</span>
+                <span>Go to Settings → Profile → paste into "What would you like Claude to know about you?"</span>
+              </li>
+              <li className="flex gap-2">
+                <span className="text-primary font-medium shrink-0">ChatGPT:</span>
+                <span>Go to Settings → Personalization → Custom Instructions → paste into "What would you like ChatGPT to know about you?"</span>
+              </li>
+              <li className="flex gap-2">
+                <span className="text-primary font-medium shrink-0">Perplexity:</span>
+                <span>Open any thread → click your profile → paste into the Memory section</span>
+              </li>
+              <li className="flex gap-2">
+                <span className="text-primary font-medium shrink-0">Others:</span>
+                <span>Paste into system prompt, custom instructions, or memory field</span>
+              </li>
+            </ul>
+          </div>
+          
+          {/* Start over */}
+          <div className="mt-4 text-center">
+            <button
+              onClick={() => {
+                setView('landing');
+                setMessages([]);
+                setConvState(createInitialState());
+                setMemoryFile('');
+                setProgress(0);
+              }}
+              className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+              data-testid="start-over-btn"
+            >
+              Start over
+            </button>
+          </div>
+        </div>
+      </main>
+
+      {/* Footer */}
+      <footer className="px-6 py-3 text-center border-t border-border/50">
+        <PerplexityAttribution />
+      </footer>
+    </div>
+  );
+}
