@@ -2,7 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Logo } from '@/components/Logo';
 import { PerplexityAttribution } from '@/components/PerplexityAttribution';
 import { apiRequest } from '@/lib/queryClient';
-import { ArrowRight, Download, Copy, Check, Sparkles, Brain, Zap, FileText } from 'lucide-react';
+import { useLocation } from 'wouter';
+import { ArrowRight, Download, Copy, Check, Sparkles, Brain, Zap, FileText, MessageCircle, ClipboardList } from 'lucide-react';
 
 type AppView = 'landing' | 'chat' | 'preview';
 
@@ -13,6 +14,7 @@ interface ChatMessage {
 }
 
 export default function Home() {
+  const [, navigate] = useLocation();
   const [view, setView] = useState<AppView>('landing');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
@@ -313,14 +315,24 @@ export default function Home() {
               you can paste into any AI — Claude, ChatGPT, Perplexity, or others.
             </p>
 
-            <button
-              onClick={startChat}
-              className="inline-flex items-center gap-2 bg-primary hover:bg-primary/90 text-primary-foreground px-6 py-3 rounded-lg font-medium text-sm transition-all duration-200 glow-pulse"
-              data-testid="start-conversation-btn"
-            >
-              Start conversation
-              <ArrowRight className="w-4 h-4" />
-            </button>
+            <div className="flex flex-col sm:flex-row gap-3 justify-center">
+              <button
+                onClick={startChat}
+                className="inline-flex items-center justify-center gap-2 bg-primary hover:bg-primary/90 text-primary-foreground px-6 py-3 rounded-lg font-medium text-sm transition-all duration-200 glow-pulse"
+                data-testid="start-conversation-btn"
+              >
+                <MessageCircle className="w-4 h-4" />
+                Chat with AI
+              </button>
+              <button
+                onClick={() => navigate('/questionnaire')}
+                className="inline-flex items-center justify-center gap-2 border border-border/60 text-foreground hover:bg-muted px-6 py-3 rounded-lg font-medium text-sm transition-all duration-200"
+                data-testid="start-questionnaire-btn"
+              >
+                <ClipboardList className="w-4 h-4" />
+                Fill Out Form
+              </button>
+            </div>
 
             {/* Features */}
             <div className="mt-16 grid grid-cols-3 gap-6 max-w-lg mx-auto">
